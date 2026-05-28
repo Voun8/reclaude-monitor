@@ -1,0 +1,14 @@
+.vscode/**
+src/**
+.gitignore
+.claude/**
+.idea/**
+.yarnrc
+vsc-extension-quickstart.md
+**/tsconfig.json
+**/eslint.config.mjs
+**/*.map
+**/*.ts
+pnpm-lock.yaml
+package-lock.json
+yarn.lock

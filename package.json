@@ -1,0 +1,97 @@
+{
+  "name": "reclaude-monitor",
+  "displayName": "Reclaude Monitor",
+  "description": "状态栏显示 reclaude 拼车额度、个人用量和服务可用性",
+  "version": "0.0.1",
+  "publisher": "local",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://localhost/reclaude-monitor.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "scripts": {
+    "vscode:prepublish": "pnpm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src",
+    "clean": "node -e \"const fs=require('fs');for (const d of ['dist','out']) fs.rmSync(d,{recursive:true,force:true});fs.mkdirSync('dist',{recursive:true})\"",
+    "package": "pnpm run clean && pnpm run compile && vsce package --no-dependencies --allow-missing-repository --skip-license --out dist/"
+  },
+  "packageManager": "pnpm@9.12.0",
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "22.x",
+    "typescript-eslint": "^8.56.1",
+    "eslint": "^9.39.3",
+    "typescript": "^5.9.3",
+    "@vscode/vsce": "^3.2.1"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      { "command": "reclaude.refresh", "title": "Reclaude: 立即刷新", "category": "Reclaude" },
+      { "command": "reclaude.addAccount", "title": "Reclaude: 添加账号", "category": "Reclaude" },
+      { "command": "reclaude.switchAccount", "title": "Reclaude: 切换账号", "category": "Reclaude" },
+      { "command": "reclaude.removeAccount", "title": "Reclaude: 删除账号", "category": "Reclaude" },
+      { "command": "reclaude.changePassword", "title": "Reclaude: 修改账号密码", "category": "Reclaude" },
+      { "command": "reclaude.setOrgId", "title": "Reclaude: 设置组织 ID", "category": "Reclaude" },
+      { "command": "reclaude.autoDetectOrgId", "title": "Reclaude: 自动探测组织 ID", "category": "Reclaude" },
+      { "command": "reclaude.setCookie", "title": "Reclaude: 设置 Cookie（备用）", "category": "Reclaude" },
+      { "command": "reclaude.clearAll", "title": "Reclaude: 清除所有账号", "category": "Reclaude" }
+    ],
+    "colors": [
+      {
+        "id": "reclaudeMonitor.statusForeground",
+        "description": "Reclaude 状态栏正常状态文字颜色（默认 Claude 品牌橙）",
+        "defaults": {
+          "dark": "#D97757",
+          "light": "#C15F3C",
+          "highContrast": "#D97757",
+          "highContrastLight": "#C15F3C"
+        }
+      }
+    ],
+    "configuration": {
+      "title": "Reclaude Monitor",
+      "properties": {
+        "reclaude.refreshOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "保存文件时自动刷新"
+        },
+        "reclaude.quotaRefreshIntervalSec": {
+          "type": "number",
+          "default": 60,
+          "minimum": 5,
+          "description": "余额（拼车额度）定时刷新间隔，单位秒；最小 5 秒"
+        },
+        "reclaude.metricsRefreshIntervalSec": {
+          "type": "number",
+          "default": 30,
+          "minimum": 5,
+          "description": "错误率（服务可用性）定时刷新间隔，单位秒；最小 5 秒"
+        },
+        "reclaude.idleActivateSec": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "无操作（无文件保存）多少秒后才开启定时刷新；0=始终开启；保存文件会取消正在跑的定时并重新计时"
+        },
+        "reclaude.orgId": {
+          "type": "string",
+          "default": "",
+          "description": "拼车组织 ID（org_id），查 5h 美元配额必填；不设则只显示百分比"
+        }
+      }
+    }
+  }
+}
