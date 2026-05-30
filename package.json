@@ -2,9 +2,10 @@
   "name": "reclaude-monitor",
   "displayName": "Reclaude Monitor",
   "description": "状态栏显示 reclaude 拼车额度、个人用量和服务可用性",
-  "version": "0.0.1",
-  "publisher": "local",
+  "version": "0.0.2",
+  "publisher": "ReclaudeMonitor",
   "license": "MIT",
+  "icon": "media/icon.png",
   "repository": {
     "type": "git",
     "url": "https://localhost/reclaude-monitor.git"
@@ -48,6 +49,16 @@
       { "command": "reclaude.setCookie", "title": "Reclaude: 设置 Cookie（备用）", "category": "Reclaude" },
       { "command": "reclaude.clearAll", "title": "Reclaude: 清除所有账号", "category": "Reclaude" }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "reclaudeMonitor", "title": "Reclaude Monitor", "icon": "media/icon.svg" }
+      ]
+    },
+    "views": {
+      "reclaudeMonitor": [
+        { "id": "reclaude.dashboard", "name": "监控面板", "type": "webview" }
+      ]
+    },
     "colors": [
       {
         "id": "reclaudeMonitor.statusForeground",
@@ -89,7 +100,7 @@
         "reclaude.orgId": {
           "type": "string",
           "default": "",
-          "description": "拼车组织 ID（org_id），查 5h 美元配额必填；不设则只显示百分比"
+          "description": "（仅备用 Cookie 模式使用）拼车组织 ID。用账号密码登录时，组织 ID 会按账号各自自动记忆并探测，无需在此设置"
         }
       }
     }

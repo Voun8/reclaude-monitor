@@ -13,6 +13,7 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 interface Account {
   email: string;
   password: string;
+  orgId?: string;
 }
 
 interface QuotaData {
@@ -66,6 +67,9 @@ let metricsTimer: NodeJS.Timeout | null = null;
 let followTimer: NodeJS.Timeout | null = null;
 let idleTimer: NodeJS.Timeout | null = null;
 let pollingActive = false;
+let dashboardView: vscode.WebviewView | null = null;
+const metricsHistory: { err: number; lat: number }[] = [];
+const MAX_HISTORY = 40;
 
 export function activate(context: vscode.ExtensionContext): void {
   ctx = context;
@@ -85,6 +89,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('reclaude.setOrgId', setOrgIdCmd),
     vscode.commands.registerCommand('reclaude.autoDetectOrgId', autoDetectOrgIdCmd),
     vscode.commands.registerCommand('reclaude.clearAll', clearAllCmd),
+    vscode.window.registerWebviewViewProvider('reclaude.dashboard', dashboardProvider, { webviewOptions: { retainContextWhenHidden: true } }),
     vscode.workspace.onDidSaveTextDocument(() => {
       const cfg = getRefreshCfg();
       if (cfg.refreshOnSave) {
@@ -182,6 +187,26 @@ async function getActiveCredential(): Promise<Account | null> {
   if (!email) { return null; }
   const accounts = await getAccounts();
   return accounts.find(a => a.email === email) || null;
+}
+
+// 组织 ID 跟着账号走：优先用当前账号自己存的 orgId；
+// 仅在"备用 Cookie 模式"（没有账号）时回退到全局配置 reclaude.orgId。
+async function getActiveOrgId(): Promise<string> {
+  const cred = await getActiveCredential();
+  if (cred) { return (cred.orgId || '').trim(); }
+  return vscode.workspace.getConfiguration('reclaude').get<string>('orgId', '').trim();
+}
+
+// 把组织 ID 存到当前账号上；没有账号（Cookie 模式）时才落到全局配置。
+async function setActiveOrgId(orgId: string): Promise<void> {
+  const email = getActiveEmail();
+  const accounts = await getAccounts();
+  const hasAccount = email ? accounts.some(a => a.email === email) : false;
+  if (hasAccount) {
+    await saveAccounts(accounts.map(a => a.email === email ? { ...a, orgId } : a));
+  } else {
+    await vscode.workspace.getConfiguration('reclaude').update('orgId', orgId, vscode.ConfigurationTarget.Global);
+  }
 }
 
 // 旧版本单账号兼容：迁移到新结构
@@ -366,16 +391,16 @@ async function setCookieCmd(): Promise<void> {
 }
 
 async function setOrgIdCmd(): Promise<void> {
-  const cfg = vscode.workspace.getConfiguration('reclaude');
-  const cur = cfg.get<string>('orgId', '');
+  const cur = await getActiveOrgId();
+  const activeEmail = getActiveEmail();
   const value = await vscode.window.showInputBox({
-    prompt: '输入组织 ID（拼车组织 ID）',
+    prompt: activeEmail ? `输入 ${activeEmail} 的组织 ID（拼车组织 ID）` : '输入组织 ID（拼车组织 ID）',
     value: cur,
     ignoreFocusOut: true,
     validateInput: (v) => (v.trim() === '' ? '不能为空' : undefined)
   });
   if (value === undefined) { return; }
-  await cfg.update('orgId', value.trim(), vscode.ConfigurationTarget.Global);
+  await setActiveOrgId(value.trim());
   vscode.window.showInformationMessage(`组织 ID 已设为 ${value.trim()}`);
   refresh();
 }
@@ -533,7 +558,7 @@ async function autoDetectOrgId(cookie: string, interactive: boolean): Promise<st
 
   const id = String(chosen.org_id || chosen.allocation_id || chosen.id || '');
   if (!id) { throw new Error('返回的套餐缺少 id 字段'); }
-  await vscode.workspace.getConfiguration('reclaude').update('orgId', id, vscode.ConfigurationTarget.Global);
+  await setActiveOrgId(id);
   if (interactive) { vscode.window.showInformationMessage(`组织 ID 已自动设为 ${id}`); }
   return id;
 }
@@ -559,6 +584,7 @@ async function refreshMetricsOnly(): Promise<void> {
     const m = await fetchJSON<MetricsData>('https://reclaude.ai/api/app/ops/metrics', cookie).catch(() => null);
     if (m) {
       lastData.metrics = m;
+      pushMetricsHistory(m);
       renderFromCache();
     }
   } catch {
@@ -610,7 +636,7 @@ async function doRefresh(): Promise<void> {
     return;
   }
 
-  let orgId = vscode.workspace.getConfiguration('reclaude').get<string>('orgId', '').trim();
+  let orgId = await getActiveOrgId();
   if (!orgId) {
     try {
       const detected = await autoDetectOrgId(cookie, false);
@@ -677,6 +703,7 @@ async function doRefresh(): Promise<void> {
   }
 
   lastData = result;
+  if (result.metrics) { pushMetricsHistory(result.metrics); }
   renderFromCache();
 }
 
@@ -710,6 +737,14 @@ function fmtCountdownShort(ms: number): string {
   return `${m}分`;
 }
 
+function fmtCountdownHM(ms: number): string {
+  if (ms <= 0) { return '已重置'; }
+  const min = Math.floor(ms / 60000);
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
 function fmtNum(v: number | null | undefined): string {
   if (v === null || v === undefined) { return '-'; }
   if (v >= 1e6) { return (v / 1e6).toFixed(1) + 'M'; }
@@ -730,6 +765,23 @@ function buildColorBar(ratio: number, fillColor: string, trackColor: string): st
   const filledPart = filled > 0 ? `<span style="color:${fillColor};">${'━'.repeat(filled)}</span>` : '';
   const emptyPart = filled < barLen ? `<span style="color:${trackColor};">${'━'.repeat(barLen - filled)}</span>` : '';
   return filledPart + emptyPart;
+}
+
+// 用 Unicode 方块字符画迷你折线图（悬停 Markdown 无法用 SVG，只能近似）
+function blockSpark(vals: number[], maxLen: number): string {
+  if (!vals || vals.length === 0) { return ''; }
+  const blocks = '▁▂▃▄▅▆▇█';
+  const slice = vals.length > maxLen ? vals.slice(vals.length - maxLen) : vals;
+  let min = Math.min(...slice);
+  let max = Math.max(...slice);
+  if (max - min < 1e-9) { max = min + 1; }
+  return slice.map(v => blocks[Math.max(0, Math.min(7, Math.round((v - min) / (max - min) * 7)))]).join('');
+}
+
+function latencyLabel(ms: number): string {
+  if (ms < 1000) { return '流畅'; }
+  if (ms < 3000) { return '正常'; }
+  return '偏慢';
 }
 
 function render(quota: QuotaData | null, metrics: MetricsData | null): void {
@@ -769,9 +821,11 @@ function render(quota: QuotaData | null, metrics: MetricsData | null): void {
   md.supportThemeIcons = true;
   md.supportHtml = true;
 
+  const MUTED = '#8aa0bd';
+
   // ── 账号 ──
   if (activeEmail) {
-    md.appendMarkdown(`$(account) ${activeEmail}\n\n`);
+    md.appendMarkdown(`$(account)&nbsp; **${activeEmail}**\n\n`);
   }
 
   // ── 额度 ──
@@ -781,37 +835,472 @@ function render(quota: QuotaData | null, metrics: MetricsData | null): void {
     const ratio = total > 0 ? used / total : 0;
     const pct = ratio * 100;
     const remain = total - used;
+    const accent = ratio >= 0.95 ? '#f87171' : ratio >= 0.8 ? '#fbbf24' : '#4aa3ff';
+    const bar = buildColorBar(ratio, accent, '#44506a');
+    const resetTxt = quota.resets_at_ms ? fmtCountdownHM(quota.resets_at_ms - Date.now()) : '?';
 
-    const fillColor = ratio >= 0.95 ? '#f48771' : ratio >= 0.8 ? '#e2c08d' : '#3794ff';
-    const bar = buildColorBar(ratio, fillColor, '#3a3d41');
-    const resetShort = quota.resets_at_ms ? fmtCountdownShort(quota.resets_at_ms - Date.now()) : '';
-
-    md.appendMarkdown(`---\n\n`);
-    md.appendMarkdown(`**${pct.toFixed(1)}%** 已使用 &emsp;&emsp;&emsp; 重置 **${resetShort || '?'}**\n\n`);
+    md.appendMarkdown(`$(clock) 重置: **${resetTxt}**\n\n`);
+    md.appendMarkdown(`#### 用量: <span style="color:${accent};">${pct.toFixed(1)}%</span>\n\n`);
     md.appendMarkdown(`${bar}\n\n`);
-    md.appendMarkdown(`<sub>**$${used.toFixed(2)}** / $${total.toFixed(0)} &nbsp;·&nbsp; 剩 **$${remain.toFixed(2)}**${quota.enabled === false ? ' &nbsp;·&nbsp; $(circle-slash) 未启用' : ''}</sub>\n\n`);
+    md.appendMarkdown(`$(credit-card) 已用: &nbsp;**$${used.toFixed(2)}** &nbsp;&nbsp;&nbsp; $(server) 剩余: <span style="color:#5fd39a;">**$${remain.toFixed(2)}**</span>${quota.enabled === false ? ` &nbsp; <span style="color:#f87171;">$(circle-slash) 未启用</span>` : ''}\n\n`);
+  } else {
+    md.appendMarkdown(`<span style="color:#f87171;">$(error) **拼车数据获取失败**</span>\n\n`);
   }
 
-  // ── 可用性 ──
-  md.appendMarkdown(`---\n\n`);
+  // ── 可用性（纵向两列表格，避免窄悬浮窗三列错位）──
   if (metrics) {
     const errRate = (metrics.error_rate || 0) * 100;
-    const rpm = (metrics.rps || 0) * 60;
-    const stateIcon = errRate < 1 ? '$(pass-filled)' : errRate < 5 ? '$(warning)' : '$(error)';
-    const stateText = errRate < 1 ? '正常' : errRate < 5 ? '抖动' : '故障';
+    const stLevel = errRate < 1 ? 'ok' : errRate < 5 ? 'warn' : 'err';
+    const stColor = stLevel === 'ok' ? '#4ade80' : stLevel === 'warn' ? '#fbbf24' : '#f87171';
+    const stIcon = stLevel === 'ok' ? '$(pass-filled)' : stLevel === 'warn' ? '$(warning)' : '$(error)';
+    const stText = stLevel === 'ok' ? '正常' : stLevel === 'warn' ? '抖动' : '故障';
+    const stSub = stLevel === 'ok' ? '稳定' : stLevel === 'warn' ? '不稳定' : '中断';
+    const errColor = errRate >= 5 ? '#f87171' : errRate >= 1 ? '#fbbf24' : '#4ade80';
+    const errSpark = blockSpark(metricsHistory.map(h => h.err), 8);
+    const latSpark = blockSpark(metricsHistory.map(h => h.lat), 8);
 
-    md.appendMarkdown(`$(pulse) **服务可用性** <sub>60s 窗口</sub>\n\n`);
-    md.appendMarkdown(`状态 &emsp;&emsp; ${stateIcon} **${stateText}**\n\n`);
-    md.appendMarkdown(`错误率 &emsp; **${errRate.toFixed(2)}%** <sub>(${metrics.error_count}/${metrics.req_count})</sub>\n\n`);
-    md.appendMarkdown(`平均延迟 &emsp; **${fmtMs(metrics.avg_latency_ms)}**\n\n`);
-    md.appendMarkdown(`请求/分 &emsp; **${fmtNum(rpm)}** &nbsp;·&nbsp; 令牌/分 &emsp;**${fmtNum(metrics.tpm)}**\n\n`);
+    md.appendMarkdown(`| $(pulse) 服务可用性 | <span style="color:${MUTED};">60s 窗口</span> |\n|:--|:--|\n`);
+    md.appendMarkdown(`| <span style="color:${MUTED};">状态</span> | <span style="color:${stColor};">${stIcon} **${stText}**</span> &nbsp;<span style="color:${MUTED};">${stSub}</span> |\n`);
+    md.appendMarkdown(`| <span style="color:${MUTED};">错误率</span> | <span style="color:${errColor};">**${errRate.toFixed(2)}%**</span> &nbsp;<span style="color:${MUTED};">${metrics.error_count}/${metrics.req_count}</span> &nbsp;<span style="color:${errColor};">${errSpark}</span> |\n`);
+    md.appendMarkdown(`| <span style="color:${MUTED};">平均延迟</span> | <span style="color:#4aa3ff;">**${fmtMs(metrics.avg_latency_ms)}**</span> &nbsp;<span style="color:${MUTED};">${latencyLabel(metrics.avg_latency_ms || 0)}</span> &nbsp;<span style="color:#4aa3ff;">${latSpark}</span> |\n\n`);
   } else {
-    md.appendMarkdown(`$(pulse) **服务可用性** &nbsp;·&nbsp; *指标获取失败*\n\n`);
+    md.appendMarkdown(`#### $(pulse) 服务可用性\n\n<span style="color:#f87171;">*指标获取失败*</span>\n\n`);
+  }
+
+  // ── 速率 ──
+  if (metrics) {
+    const rpm = (metrics.rps || 0) * 60;
+    md.appendMarkdown(`#### $(dashboard) 速率 <span style="color:${MUTED};">(1分钟窗口)</span>\n\n`);
+    md.appendMarkdown(`- 请求: &nbsp;→ **${fmtNum(rpm)}** / 分\n`);
+    md.appendMarkdown(`- 令牌: &nbsp;$(database) **${fmtNum(metrics.tpm)}** / 分\n\n`);
   }
 
   // ── 操作 ──
-  md.appendMarkdown(`---\n\n`);
-  md.appendMarkdown(`[$(refresh) 刷新](command:reclaude.refresh) &nbsp;·&nbsp; [$(arrow-swap) 切换](command:reclaude.switchAccount) &nbsp;·&nbsp; [$(add) 添加](command:reclaude.addAccount) &nbsp;·&nbsp; [$(key) 改密](command:reclaude.changePassword) &nbsp;·&nbsp; [$(organization) 组织](command:reclaude.setOrgId)`);
+  md.appendMarkdown(`**操作:**\n\n`);
+  md.appendMarkdown(`[$(refresh) 刷新](command:reclaude.refresh) &nbsp;&nbsp; [$(arrow-swap) 切换](command:reclaude.switchAccount) &nbsp;&nbsp; [$(add) 添加](command:reclaude.addAccount) &nbsp;&nbsp; [$(key) 改密](command:reclaude.changePassword) &nbsp;&nbsp; [$(organization) 组织](command:reclaude.setOrgId)`);
 
-  setStatus(`${icon} ${mainText}`, 'reclaude.refresh', level, md);
+  setStatus(`${icon} ${mainText}`, 'reclaude.dashboard.focus', level, md);
+  postToPanel();
+}
+
+// ============ Webview 面板 ============
+function pushMetricsHistory(m: MetricsData): void {
+  metricsHistory.push({ err: (m.error_rate || 0) * 100, lat: m.avg_latency_ms || 0 });
+  if (metricsHistory.length > MAX_HISTORY) {
+    metricsHistory.splice(0, metricsHistory.length - MAX_HISTORY);
+  }
+}
+
+function buildPanelPayload() {
+  const email = getActiveEmail();
+  const q = lastData ? lastData.quota : null;
+  let quota: unknown = null;
+  if (q && q.quota_usd !== null && q.quota_usd !== undefined) {
+    const used = parseFloat(String(q.used_usd ?? '0'));
+    const total = parseFloat(String(q.quota_usd ?? '0'));
+    const ratio = total > 0 ? used / total : 0;
+    quota = {
+      usedUsd: used,
+      totalUsd: total,
+      remainingUsd: total - used,
+      pct: ratio * 100,
+      ratio,
+      resetAtMs: q.resets_at_ms || 0,
+      enabled: q.enabled !== false
+    };
+  }
+  const mm = lastData ? lastData.metrics : null;
+  let metrics: unknown = null;
+  if (mm) {
+    const errRate = (mm.error_rate || 0) * 100;
+    const stateLevel: StatusLevel = errRate < 1 ? 'ok' : errRate < 5 ? 'warn' : 'err';
+    metrics = {
+      errorRatePct: errRate,
+      errorCount: mm.error_count || 0,
+      reqCount: mm.req_count || 0,
+      avgLatencyMs: mm.avg_latency_ms || 0,
+      rpm: (mm.rps || 0) * 60,
+      tpm: mm.tpm || 0,
+      stateLevel,
+      stateText: stateLevel === 'ok' ? '正常' : stateLevel === 'warn' ? '抖动' : '故障'
+    };
+  }
+  return {
+    email,
+    quota,
+    metrics,
+    history: { err: metricsHistory.map(h => h.err), lat: metricsHistory.map(h => h.lat) }
+  };
+}
+
+function postToPanel(): void {
+  if (!dashboardView) { return; }
+  dashboardView.webview.postMessage({ type: 'data', payload: buildPanelPayload() });
+}
+
+interface DashboardMessage {
+  type?: string;
+  command?: string;
+  email?: string;
+  password?: string;
+  orgId?: string;
+}
+
+async function postAccounts(): Promise<void> {
+  if (!dashboardView) { return; }
+  const accounts = await getAccounts();
+  const active = getActiveEmail();
+  const orgId = await getActiveOrgId();
+  dashboardView.webview.postMessage({
+    type: 'accounts',
+    accounts: accounts.map(a => ({ email: a.email, active: a.email === active })),
+    orgId
+  });
+}
+
+async function handleDashboardMessage(msg: DashboardMessage): Promise<void> {
+  if (!msg || typeof msg.type !== 'string') {
+    if (msg && msg.command) { vscode.commands.executeCommand(msg.command); }
+    return;
+  }
+  switch (msg.type) {
+    case 'refresh':
+      refresh();
+      break;
+    case 'getAccounts':
+      await postAccounts();
+      break;
+    case 'switch':
+      if (msg.email) {
+        await setActiveEmail(msg.email);
+        cachedCookie = null; cachedCookieEmail = null;
+        refresh();
+        await postAccounts();
+      }
+      break;
+    case 'add': {
+      const email = (msg.email || '').trim();
+      const password = msg.password || '';
+      if (!email || !password) { return; }
+      const accounts = await getAccounts();
+      const existing = accounts.find(a => a.email === email);
+      if (existing) { existing.password = password; } else { accounts.push({ email, password }); }
+      await saveAccounts(accounts);
+      if (!getActiveEmail()) { await setActiveEmail(email); }
+      cachedCookie = null; cachedCookieEmail = null;
+      refresh();
+      await postAccounts();
+      break;
+    }
+    case 'changePassword': {
+      const email = (msg.email || '').trim();
+      const password = msg.password || '';
+      if (!email || !password) { return; }
+      const accounts = await getAccounts();
+      await saveAccounts(accounts.map(a => a.email === email ? { ...a, password } : a));
+      if (email === getActiveEmail()) { cachedCookie = null; cachedCookieEmail = null; }
+      refresh();
+      await postAccounts();
+      break;
+    }
+    case 'remove': {
+      const email = msg.email;
+      if (!email) { return; }
+      const accounts = await getAccounts();
+      const filtered = accounts.filter(a => a.email !== email);
+      await saveAccounts(filtered);
+      if (getActiveEmail() === email) {
+        await setActiveEmail(filtered[0] ? filtered[0].email : undefined);
+        cachedCookie = null; cachedCookieEmail = null;
+      }
+      refresh();
+      await postAccounts();
+      break;
+    }
+    case 'setOrgId':
+      await setActiveOrgId((msg.orgId || '').trim());
+      refresh();
+      break;
+    case 'autoDetectOrgId':
+      try {
+        const cookie = await getCookie(false);
+        if (cookie) { await autoDetectOrgId(cookie, true); refresh(); }
+      } catch {
+        // 忽略
+      }
+      break;
+  }
+}
+
+const dashboardProvider: vscode.WebviewViewProvider = {
+  resolveWebviewView(view: vscode.WebviewView): void {
+    dashboardView = view;
+    view.webview.options = { enableScripts: true };
+    view.webview.html = getWebviewHtml(view.webview);
+    view.webview.onDidReceiveMessage((msg: DashboardMessage) => { handleDashboardMessage(msg); });
+    view.onDidDispose(() => { dashboardView = null; });
+    view.onDidChangeVisibility(() => { if (view.visible) { postToPanel(); postAccounts(); } });
+    postToPanel();
+    postAccounts();
+    if (!lastData) { refresh(); }
+  }
+};
+
+function getNonce(): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let s = '';
+  for (let i = 0; i < 24; i++) { s += chars.charAt(Math.floor(Math.random() * chars.length)); }
+  return s;
+}
+
+function getWebviewHtml(webview: vscode.Webview): string {
+  const nonce = getNonce();
+  const csp = `default-src 'none'; img-src ${webview.cspSource}; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';`;
+  return `<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="${csp}">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 12px; font-size: 13px; line-height: 1.4;
+    font-family: var(--vscode-font-family, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif);
+    color: var(--vscode-foreground); background: var(--vscode-sideBar-background, transparent); }
+  .hello { font-size: 12px; color: var(--vscode-descriptionForeground); }
+  .email { font-size: 15px; font-weight: 700; margin: 2px 0 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card { background: var(--vscode-editorWidget-background, rgba(127,127,127,0.06));
+    border: 1px solid var(--vscode-editorWidget-border, rgba(127,127,127,0.22));
+    border-radius: 10px; padding: 13px; margin-bottom: 10px; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+  .card-title { font-size: 14px; font-weight: 700; }
+  .sub { font-size: 12px; color: var(--vscode-descriptionForeground); font-weight: 400; }
+  .badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .badge .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .badge.ok { background: rgba(46,160,67,0.16); color: #3fb950; }
+  .badge.warn { background: rgba(210,153,34,0.18); color: #d29922; }
+  .badge.err { background: rgba(248,81,73,0.16); color: #f85149; }
+  .amount { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+  .amount .big { font-size: 22px; font-weight: 700; }
+  .amount .pct { font-size: 14px; font-weight: 600; color: var(--vscode-descriptionForeground); }
+  .bar { height: 8px; border-radius: 999px; background: rgba(127,127,127,0.24); overflow: hidden; }
+  .bar-fill { height: 100%; width: 0%; border-radius: 999px; background: linear-gradient(90deg,#34d399,#10b981); transition: width .3s ease; }
+  .muted { font-size: 12px; color: var(--vscode-descriptionForeground); margin-top: 8px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat { background: rgba(127,127,127,0.07); border: 1px solid rgba(127,127,127,0.16); border-radius: 9px; padding: 9px 11px; }
+  .stat-label { font-size: 12px; color: var(--vscode-descriptionForeground); margin-bottom: 3px; }
+  .stat-val { font-size: 16px; font-weight: 700; }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .btn { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; border-radius: 7px; padding: 6px 10px; font-size: 13px; user-select: none;
+    background: var(--vscode-button-secondaryBackground, rgba(127,127,127,0.14));
+    color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+    border: 1px solid var(--vscode-button-border, transparent); }
+  .btn:hover { background: var(--vscode-button-secondaryHoverBackground, rgba(127,127,127,0.26)); }
+  .btn.primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: transparent; }
+  .btn.primary:hover { background: var(--vscode-button-hoverBackground); }
+  .form { margin-top: 11px; display: none; }
+  .form.show { display: block; }
+  .field { margin-bottom: 8px; }
+  .field label { display: block; font-size: 12px; color: var(--vscode-descriptionForeground); margin-bottom: 4px; }
+  .field input, .field select { width: 100%; padding: 6px 8px; font-size: 13px; border-radius: 6px; outline: none;
+    background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, rgba(127,127,127,0.3)); }
+  .field input:focus, .field select:focus { border-color: var(--vscode-focusBorder); }
+  .form-btns { display: flex; gap: 6px; margin-top: 6px; }
+  .acct-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; border-radius: 7px; cursor: pointer;
+    border: 1px solid rgba(127,127,127,0.16); margin-bottom: 6px; background: rgba(127,127,127,0.05); }
+  .acct-row:hover { background: rgba(127,127,127,0.16); }
+  .acct-row.active { border-color: #3fb950; }
+  .acct-email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .acct-del { cursor: pointer; padding: 2px 7px; border-radius: 5px; color: var(--vscode-descriptionForeground); }
+  .acct-del:hover { color: #f85149; background: rgba(248,81,73,0.14); }
+  .empty { font-size: 12px; color: var(--vscode-descriptionForeground); padding: 4px 0 8px; }
+</style>
+</head>
+<body>
+  <div class="hello">欢迎回来</div>
+  <div class="email" id="email">--</div>
+
+  <div class="card">
+    <div class="card-head">
+      <span class="card-title">拼车额度</span>
+      <span class="badge ok" id="quota-badge"><span class="dot"></span>有效</span>
+    </div>
+    <div class="amount"><span class="big" id="quota-amt">$-- / $--</span><span class="pct" id="quota-pct">--</span></div>
+    <div class="bar"><div class="bar-fill" id="bar-fill"></div></div>
+    <div class="muted" id="quota-reset"></div>
+    <div class="grid" style="margin-top:11px;">
+      <div class="stat"><div class="stat-label">已用</div><div class="stat-val" id="s-used">--</div></div>
+      <div class="stat"><div class="stat-label">剩余</div><div class="stat-val" id="s-remain">--</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <span class="card-title">服务可用性 <span class="sub">60s 窗口</span></span>
+      <span class="badge ok" id="state-badge"><span class="dot"></span>--</span>
+    </div>
+    <div class="grid">
+      <div class="stat"><div class="stat-label">错误率</div><div class="stat-val" id="s-err">--</div></div>
+      <div class="stat"><div class="stat-label">平均延迟</div><div class="stat-val" id="s-lat">--</div></div>
+      <div class="stat"><div class="stat-label">请求 / 分</div><div class="stat-val" id="s-rpm">--</div></div>
+      <div class="stat"><div class="stat-label">令牌 / 分</div><div class="stat-val" id="s-tpm">--</div></div>
+    </div>
+    <div class="muted" id="err-counts"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="card-title">操作</span></div>
+    <div class="actions">
+      <div class="btn" data-act="refresh">&#8635; 刷新</div>
+      <div class="btn" data-act="switch">&#8644; 切换</div>
+      <div class="btn" data-act="add">&#43; 添加</div>
+      <div class="btn" data-act="password">&#128273; 改密</div>
+      <div class="btn" data-act="org">&#127970; 组织</div>
+    </div>
+    <div class="form" id="form"></div>
+  </div>
+
+<script nonce="${nonce}">
+  var vscode = acquireVsCodeApi();
+  var last = null, accounts = [], curOrg = '', openAct = null;
+  var formEl = document.getElementById('form');
+
+  function $(id) { return document.getElementById(id); }
+  function setText(id, t) { var el = $(id); if (el) { el.textContent = t; } }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function post(m) { vscode.postMessage(m); }
+  function fmtNum(v) { if (v == null) return '-'; if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M'; if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k'; return String(Math.round(v)); }
+  function fmtMs(v) { if (v == null) return '-'; if (v >= 1000) return (v / 1000).toFixed(2) + 's'; return Math.round(v) + 'ms'; }
+  function fmtCountdown(ms) { if (ms <= 0) return '已重置'; var t = Math.floor(ms / 60000), hh = Math.floor(t / 60), mm = t % 60; return hh > 0 ? (hh + 'h ' + mm + 'm') : (mm + 'm'); }
+  function setBadge(id, level, text) { var el = $(id); if (!el) return; el.className = 'badge ' + level; el.innerHTML = '<span class="dot"></span>' + esc(text); }
+  function renderReset() {
+    if (!last || !last.quota || !last.quota.resetAtMs) { setText('quota-reset', ''); return; }
+    setText('quota-reset', '还有 ' + fmtCountdown(last.quota.resetAtMs - Date.now()) + ' 归零');
+  }
+  function render(p) {
+    last = p;
+    setText('email', p.email || '未登录');
+    var q = p.quota;
+    if (q) {
+      var r = Math.max(0, Math.min(1, q.ratio));
+      setText('quota-amt', '$' + q.usedUsd.toFixed(2) + ' / $' + q.totalUsd.toFixed(2));
+      setText('quota-pct', q.pct.toFixed(1) + '%');
+      var fill = $('bar-fill');
+      fill.style.width = (r * 100).toFixed(1) + '%';
+      var c = 'linear-gradient(90deg,#34d399,#10b981)';
+      if (r >= 0.95) c = 'linear-gradient(90deg,#fb7185,#ef4444)';
+      else if (r >= 0.8) c = 'linear-gradient(90deg,#fbbf24,#f59e0b)';
+      fill.style.background = c;
+      setBadge('quota-badge', q.enabled ? 'ok' : 'err', q.enabled ? '有效' : '未启用');
+      setText('s-used', '$' + q.usedUsd.toFixed(2));
+      setText('s-remain', '$' + q.remainingUsd.toFixed(2));
+      renderReset();
+    } else {
+      setText('quota-amt', '数据获取失败'); setText('quota-pct', '');
+      $('bar-fill').style.width = '0%';
+      setBadge('quota-badge', 'err', '失败');
+      setText('s-used', '--'); setText('s-remain', '--'); setText('quota-reset', '');
+    }
+    var m = p.metrics;
+    if (m) {
+      setBadge('state-badge', m.stateLevel, m.stateText);
+      setText('s-err', m.errorRatePct.toFixed(2) + '%');
+      setText('s-lat', fmtMs(m.avgLatencyMs));
+      setText('s-rpm', fmtNum(m.rpm));
+      setText('s-tpm', fmtNum(m.tpm));
+      setText('err-counts', '错误 ' + m.errorCount + ' / ' + m.reqCount + ' 请求');
+    } else {
+      setBadge('state-badge', 'err', '指标失败');
+      setText('s-err', '--'); setText('s-lat', '--'); setText('s-rpm', '-'); setText('s-tpm', '-'); setText('err-counts', '');
+    }
+  }
+
+  function field(label, inner) { return '<div class="field"><label>' + esc(label) + '</label>' + inner + '</div>'; }
+  function saveCancel(saveText) { return '<div class="form-btns"><div class="btn primary" id="f-save">' + esc(saveText) + '</div><div class="btn" id="f-cancel">取消</div></div>'; }
+  function acctSelect() {
+    var o = '';
+    for (var i = 0; i < accounts.length; i++) { o += '<option value="' + esc(accounts[i].email) + '">' + esc(accounts[i].email) + '</option>'; }
+    return '<select id="f-acct">' + o + '</select>';
+  }
+  function acctList() {
+    if (!accounts.length) return '<div class="empty">还没有账号，点「添加」新增。</div>';
+    var h = '';
+    for (var i = 0; i < accounts.length; i++) {
+      var a = accounts[i];
+      h += '<div class="acct-row' + (a.active ? ' active' : '') + '" data-email="' + esc(a.email) + '">'
+         + '<span class="acct-email">' + (a.active ? '● ' : '') + esc(a.email) + '</span>'
+         + '<span class="acct-del" data-del="' + esc(a.email) + '" title="删除">&#10005;</span>'
+         + '</div>';
+    }
+    return h + '<div class="form-btns"><div class="btn" id="f-cancel">关闭</div></div>';
+  }
+  function closeForm() { openAct = null; formEl.className = 'form'; formEl.innerHTML = ''; }
+  function openForm(act) {
+    openAct = act;
+    var h = '';
+    if (act === 'add') {
+      h = field('邮箱', '<input id="f-email" type="text" placeholder="name@example.com">')
+        + field('密码', '<input id="f-pass" type="password" placeholder="密码">')
+        + saveCancel('保存');
+    } else if (act === 'switch') {
+      h = acctList();
+    } else if (act === 'password') {
+      h = field('账号', acctSelect())
+        + field('新密码', '<input id="f-pass" type="password" placeholder="新密码">')
+        + saveCancel('保存');
+    } else if (act === 'org') {
+      h = field('组织 ID (org_id)', '<input id="f-org" type="text" value="' + esc(curOrg) + '" placeholder="例如 2440">')
+        + '<div class="form-btns"><div class="btn primary" id="f-save">保存</div><div class="btn" id="f-auto">自动探测</div><div class="btn" id="f-cancel">取消</div></div>';
+    }
+    formEl.innerHTML = h;
+    formEl.className = 'form show';
+    wireForm(act);
+  }
+  function wireForm(act) {
+    var cancel = $('f-cancel'); if (cancel) cancel.onclick = closeForm;
+    var save = $('f-save');
+    if (act === 'add' && save) { save.onclick = function () { var e = $('f-email').value.trim(), p = $('f-pass').value; if (!e || !p) return; post({ type: 'add', email: e, password: p }); closeForm(); }; }
+    if (act === 'password' && save) { save.onclick = function () { var a = $('f-acct'); if (!a) return; var e = a.value, p = $('f-pass').value; if (!e || !p) return; post({ type: 'changePassword', email: e, password: p }); closeForm(); }; }
+    if (act === 'org') {
+      if (save) save.onclick = function () { var v = $('f-org').value.trim(); if (!v) return; post({ type: 'setOrgId', orgId: v }); closeForm(); };
+      var auto = $('f-auto'); if (auto) auto.onclick = function () { post({ type: 'autoDetectOrgId' }); closeForm(); };
+    }
+    if (act === 'switch') {
+      var rows = formEl.querySelectorAll('.acct-row');
+      for (var i = 0; i < rows.length; i++) {
+        (function (row) { row.onclick = function (ev) { if (ev.target && ev.target.getAttribute && ev.target.getAttribute('data-del')) return; post({ type: 'switch', email: row.getAttribute('data-email') }); closeForm(); }; })(rows[i]);
+      }
+      var dels = formEl.querySelectorAll('[data-del]');
+      for (var j = 0; j < dels.length; j++) {
+        (function (d) { d.onclick = function (ev) { ev.stopPropagation(); post({ type: 'remove', email: d.getAttribute('data-del') }); closeForm(); }; })(dels[j]);
+      }
+    }
+  }
+
+  var actBtns = document.querySelectorAll('[data-act]');
+  for (var i = 0; i < actBtns.length; i++) {
+    (function (el) {
+      el.onclick = function () {
+        var a = el.getAttribute('data-act');
+        if (a === 'refresh') { post({ type: 'refresh' }); return; }
+        if (openAct === a) { closeForm(); } else { openForm(a); }
+      };
+    })(actBtns[i]);
+  }
+
+  window.addEventListener('message', function (ev) {
+    var msg = ev.data;
+    if (!msg) return;
+    if (msg.type === 'data') { render(msg.payload); }
+    else if (msg.type === 'accounts') {
+      accounts = msg.accounts || []; curOrg = msg.orgId || '';
+      if (openAct === 'switch' || openAct === 'password') { openForm(openAct); }
+    }
+  });
+  post({ type: 'getAccounts' });
+  setInterval(renderReset, 30000);
+</script>
+</body>
+</html>`;
 }

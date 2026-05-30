@@ -1,112 +1,47 @@
 # Reclaude Monitor
 
-VS Code 状态栏扩展，实时展示 [reclaude.ai](https://reclaude.ai) 的拼车额度、服务可用性，并支持多账号管理。
+VS Code 插件：在状态栏和侧边栏实时显示 reclaude 拼车额度、个人用量与服务可用性。
 
-## 状态栏
+## 功能
 
-```
-$(zap) $12.34/$50 · 3时24分 · 错误 0.2%
-```
+- **拼车额度**：状态栏显示已用 / 总额、重置倒计时；侧边栏可视化进度条。
+- **服务可用性**：错误率、平均延迟、请求/分、令牌/分实时监控。
+- **侧边栏面板**：左侧活动栏图标点开，跟随 VS Code 浅色/深色主题；刷新、切换、添加、改密、组织等操作全部内联在面板内完成。
+- **多账号管理**：添加多个账号、一键切换、修改密码；组织 ID（org_id）按账号各自记忆与自动探测，切换账号自动套用。
+- **自动跟随**：检测 `~/.reclaude/device.json`，自动同步 reclaude 当前账号。
+- **定时刷新**：额度与指标独立刷新间隔，支持闲置暂停。
 
-- 已用 / 总额度（美元）
-- 距下次额度重置的倒计时
-- 最近 60 秒服务错误率
+## 使用
 
-悬浮可查看完整面板：当前账号、彩色进度条、剩余额度、错误率、平均延迟、RPM / TPM，以及刷新、切换账号、添加账号、改密、设置组织 ID 等快捷操作。
-
-颜色分级：
-
-| 颜色 | 阈值 |
-| --- | --- |
-| 蓝（默认） | 使用率 < 80% 且错误率 < 1% |
-| 黄 | 使用率 ≥ 80% 或 错误率 ≥ 1% |
-| 红 | 使用率 ≥ 95% 或 错误率 ≥ 5% |
-
-## 安装
-
-需要 VS Code `1.85.0` 及以上。
-
-```powershell
-pnpm install
-pnpm run package
-```
-
-打包后的 `.vsix` 位于 `dist/`，在 VS Code 执行 **Extensions: Install from VSIX...** 选中即可。开发时按 `F5` 启动扩展开发宿主窗口。
-
-## 快速开始
-
-1. 命令面板执行 **Reclaude: 添加账号**，输入邮箱与密码。凭证使用 VS Code SecretStorage（系统密钥环）加密存储。
-2. 扩展会自动登录并探测拼车组织 ID：账号下仅有 1 个套餐时直接选用；多个套餐时弹窗让你选择。
-3. 状态栏立即开始刷新。
-
-## 命令
-
-命令面板搜索 `Reclaude:`：
-
-| 命令 | 说明 |
-| --- | --- |
-| Reclaude: 立即刷新 | 手动触发一次刷新 |
-| Reclaude: 添加账号 | 新增账号（邮箱 + 密码） |
-| Reclaude: 切换账号 | 在已保存的多账号间切换 |
-| Reclaude: 删除账号 | 删除某个保存的账号 |
-| Reclaude: 修改账号密码 | 更新已保存账号的密码 |
-| Reclaude: 设置组织 ID | 手动指定拼车组织（`org_id`） |
-| Reclaude: 自动探测组织 ID | 重新探测当前账号下的拼车套餐 |
-| Reclaude: 设置 Cookie（备用） | 手动粘贴 `rc_sid=...` Cookie |
-| Reclaude: 清除所有账号 | 清空所有凭证和缓存 |
+1. 点击左侧活动栏的 Reclaude 图标打开侧边栏面板。
+2. 点「添加」，输入邮箱和密码（也可用命令 `Reclaude: 添加账号`）。
+3. 插件自动登录并探测组织 ID（org_id）。
+4. 状态栏显示额度与服务状态，鼠标悬停查看详情；侧边栏查看完整面板并进行操作。
 
 ## 配置项
 
-`settings.json` 或设置界面搜索 `reclaude`：
-
-| 配置项 | 默认 | 说明 |
+| 配置 | 默认值 | 说明 |
 | --- | --- | --- |
 | `reclaude.refreshOnSave` | `true` | 保存文件时自动刷新 |
-| `reclaude.quotaRefreshIntervalSec` | `60` | 拼车额度轮询间隔（秒），最小 5 |
-| `reclaude.metricsRefreshIntervalSec` | `30` | 服务可用性轮询间隔（秒），最小 5 |
-| `reclaude.idleActivateSec` | `0` | 多少秒未保存文件才启用轮询，`0` = 始终启用 |
-| `reclaude.orgId` | `""` | 拼车组织 ID，留空时自动探测 |
+| `reclaude.quotaRefreshIntervalSec` | `60` | 余额刷新间隔（秒） |
+| `reclaude.metricsRefreshIntervalSec` | `30` | 错误率刷新间隔（秒） |
+| `reclaude.idleActivateSec` | `0` | 闲置多久后才定时刷新；0=始终 |
+| `reclaude.orgId` | `""` | 拼车组织 ID（仅备用 Cookie 模式使用；账号密码模式按账号自动记忆） |
 
-状态栏正常态文字颜色可在主题中覆盖：
+## 开发与打包
 
-```json
-"workbench.colorCustomizations": {
-  "reclaudeMonitor.statusForeground": "#D97757"
-}
+```bash
+pnpm install
+pnpm run compile      # 编译 TypeScript 到 out/
+pnpm run package      # 清理 + 编译 + 用 vsce 打包到 dist/*.vsix
 ```
 
-默认色取自 Claude 品牌橙。
+安装打包好的 vsix：
 
-## 多账号与自动跟随
+```bash
+code --install-extension dist/reclaude-monitor-0.0.2.vsix --force
+```
 
-- 所有凭证存于 VS Code SecretStorage，平台对应系统密钥环（Windows Credential Manager / macOS Keychain / libsecret），不会落盘明文。
-- 每 10 秒读取 `~/.reclaude/device.json`，若发现 reclaude 客户端切换到了**已保存在扩展中**的另一个账号，状态栏自动同步。
-
-## 鉴权失败处理
-
-- HTTP `400/401/403/422`：判定为账号或密码错误，弹窗提示重新输入。
-- Cookie 失效（数据接口返回 `401/403`）：自动重新登录一次。
-- 持续失败：状态栏显示 `$(key) 账号或密码错误`，点击直接进入「修改账号密码」流程。
-
-## 工作原理
-
-扩展只调用 4 个公开接口：
-
-| 接口 | 用途 |
-| --- | --- |
-| `POST /api/auth/login` | 账号密码换 `Set-Cookie` |
-| `GET  /api/app/billing/carpool-allocations` | 列出账号下的拼车套餐（自动探测 `org_id`） |
-| `GET  /api/app/billing/carpool-quota?org_id=...` | 查询拼车额度 |
-| `GET  /api/app/ops/metrics` | 查询近 60 秒错误率、RPS、TPM、平均延迟 |
-
-请求均携带 `User-Agent` 与 `referer: https://reclaude.ai/app`。Cookie 仅内存缓存，账号切换时立即失效。
-
-## 隐私
-
-- 邮箱、密码、Cookie 全部走 VS Code SecretStorage。
-- 不向 `settings.json` 或日志写入任何凭证。
-- 「清除所有账号」会一并清除遗留的旧版字段。
-
-## 许可
+## License
 
 MIT
