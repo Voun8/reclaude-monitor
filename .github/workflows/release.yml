@@ -32,9 +32,17 @@ jobs:
       - name: Package VSIX
         run: pnpm run package
 
+      # 从 CHANGELOG.md 提取最新版本块，作为 GitHub Release 正文。
+      - name: Extract release notes from CHANGELOG
+        shell: bash
+        run: |
+          awk '/^## \[/{n++; if(n==2) exit} n==1 && !/^## \[/' CHANGELOG.md > /tmp/release-notes.md
+          test -s /tmp/release-notes.md
+
       - name: Create draft release
         uses: softprops/action-gh-release@v2
         with:
           draft: true
           prerelease: false
+          body_path: /tmp/release-notes.md
           files: dist/*.vsix
