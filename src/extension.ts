@@ -104,6 +104,10 @@ function shouldFallback(e: unknown): boolean {
   return err.kind !== 'bad-credentials' && err.kind !== 'auth';
 }
 
+function isRbacAccessDenied(body: string): boolean {
+  return body.toLowerCase().includes('rbac: access denied');
+}
+
 function canFallback(apiBase: string, e: unknown): boolean {
   return !configuredApiBase() && apiBase === DEFAULT_API_BASE && shouldFallback(e);
 }
@@ -520,6 +524,11 @@ async function loginAt(apiBase: string, email: string, password: string): Promis
   }
   if (!res.ok) {
     const body = await res.text();
+    if (res.status === 403 && isRbacAccessDenied(body)) {
+      const err: TaggedError = new Error(`API 访问被拒绝（HTTP 403）：${body.slice(0, 200)}`);
+      err.kind = 'http';
+      throw err;
+    }
     if (res.status === 400 || res.status === 401 || res.status === 403 || res.status === 422) {
       const err: TaggedError = new Error(`账号或密码错误（HTTP ${res.status}）`);
       err.kind = 'bad-credentials';
@@ -639,10 +648,22 @@ async function fetchJSON<T = unknown>(url: string, session: ApiSession): Promise
     err.kind = 'network';
     throw err;
   }
-  if (res.status === 401 || res.status === 403) {
-    const err: TaggedError = new Error(`auth-${res.status}`); err.kind = 'auth'; throw err;
+  if (!res.ok) {
+    const body = await res.text();
+    if (res.status === 403 && isRbacAccessDenied(body)) {
+      const err: TaggedError = new Error(`API 访问被拒绝（HTTP 403）：${body.slice(0, 200)}`);
+      err.kind = 'http';
+      throw err;
+    }
+    if (res.status === 401 || res.status === 403) {
+      const err: TaggedError = new Error(`auth-${res.status}`);
+      err.kind = 'auth';
+      throw err;
+    }
+    const err: TaggedError = new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+    err.kind = 'http';
+    throw err;
   }
-  if (!res.ok) { const err: TaggedError = new Error(`HTTP ${res.status}`); err.kind = 'http'; throw err; }
   return res.json() as Promise<T>;
 }
 
