@@ -8,6 +8,8 @@ const ACTIVE_EMAIL_STATE = 'reclaude.activeEmail';
 const COOKIE_KEY = 'reclaude.cookie';
 const LEGACY_EMAIL_KEY = 'reclaude.email';
 const LEGACY_PASS_KEY = 'reclaude.password';
+const DEFAULT_API_BASE = 'https://reclaude.ai';
+const FALLBACK_API_BASE = 'https://www.recode.cat';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
 
 interface Account {
@@ -50,16 +52,22 @@ interface CarpoolAllocation {
 }
 
 interface TaggedError extends Error {
-  kind?: 'bad-credentials' | 'auth' | 'http';
+  kind?: 'bad-credentials' | 'auth' | 'http' | 'network';
 }
 
 type StatusLevel = 'ok' | 'warn' | 'err';
+
+interface ApiSession {
+  cookie: string;
+  apiBase: string;
+}
 
 let statusBar: vscode.StatusBarItem;
 let ctx: vscode.ExtensionContext;
 let refreshing = false;
 let cachedCookie: string | null = null;
 let cachedCookieEmail: string | null = null;
+let cachedCookieApiBase: string | null = null;
 let lastData: RefreshResult | null = null;
 let tickTimer: NodeJS.Timeout | null = null;
 let quotaTimer: NodeJS.Timeout | null = null;
@@ -70,6 +78,41 @@ let pollingActive = false;
 let dashboardView: vscode.WebviewView | null = null;
 const metricsHistory: { err: number; lat: number }[] = [];
 const MAX_HISTORY = 40;
+
+function normalizeApiBase(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) { return null; }
+  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  return withScheme.replace(/\/+$/, '');
+}
+
+function configuredApiBase(): string | null {
+  const raw = vscode.workspace.getConfiguration('reclaude').get<string>('apiBase', '');
+  return normalizeApiBase(raw || '');
+}
+
+function defaultApiBases(): string[] {
+  return [DEFAULT_API_BASE, FALLBACK_API_BASE];
+}
+
+function apiUrl(apiBase: string, pathname: string): string {
+  return `${apiBase}${pathname}`;
+}
+
+function shouldFallback(e: unknown): boolean {
+  const err = e as TaggedError;
+  return err.kind !== 'bad-credentials' && err.kind !== 'auth';
+}
+
+function canFallback(apiBase: string, e: unknown): boolean {
+  return !configuredApiBase() && apiBase === DEFAULT_API_BASE && shouldFallback(e);
+}
+
+function clearCookieCache(): void {
+  cachedCookie = null;
+  cachedCookieEmail = null;
+  cachedCookieApiBase = null;
+}
 
 export function activate(context: vscode.ExtensionContext): void {
   ctx = context;
@@ -105,6 +148,10 @@ export function activate(context: vscode.ExtensionContext): void {
         e.affectsConfiguration('reclaude.idleActivateSec')
       ) {
         resetIdleSchedule();
+      }
+      if (e.affectsConfiguration('reclaude.apiBase')) {
+        clearCookieCache();
+        refresh();
       }
     })
   );
@@ -250,8 +297,7 @@ async function addAccountCmd(): Promise<void> {
   }
   await saveAccounts(accounts);
   if (!getActiveEmail()) { await setActiveEmail(email.trim()); }
-  cachedCookie = null;
-  cachedCookieEmail = null;
+  clearCookieCache();
   refresh();
 }
 
@@ -270,8 +316,7 @@ async function switchAccountCmd(): Promise<void> {
   const picked = await vscode.window.showQuickPick(items, { placeHolder: '选择要激活的账号' });
   if (!picked) { return; }
   await setActiveEmail(picked.email);
-  cachedCookie = null;
-  cachedCookieEmail = null;
+  clearCookieCache();
   vscode.window.showInformationMessage(`已切换到：${picked.email}`);
   refresh();
 }
@@ -291,8 +336,7 @@ async function removeAccountCmd(): Promise<void> {
   await saveAccounts(filtered);
   if (getActiveEmail() === picked.email) {
     await setActiveEmail(filtered[0] ? filtered[0].email : undefined);
-    cachedCookie = null;
-    cachedCookieEmail = null;
+    clearCookieCache();
   }
   vscode.window.showInformationMessage(`已删除：${picked.email}`);
   refresh();
@@ -322,8 +366,7 @@ async function changePasswordCmd(): Promise<void> {
   const next = accounts.map(a => a.email === picked.email ? { ...a, password } : a);
   await saveAccounts(next);
   if (picked.email === active) {
-    cachedCookie = null;
-    cachedCookieEmail = null;
+    clearCookieCache();
   }
   vscode.window.showInformationMessage(`已更新 ${picked.email} 的密码`);
   refresh();
@@ -369,14 +412,14 @@ async function promptReenterCredentials(reason?: string): Promise<boolean> {
   }
   await saveAccounts(accounts);
   await setActiveEmail(trimmedEmail);
-  cachedCookie = null;
-  cachedCookieEmail = null;
+  clearCookieCache();
   return true;
 }
 
 async function setCookieCmd(): Promise<void> {
+  const base = configuredApiBase() || DEFAULT_API_BASE;
   const input = await vscode.window.showInputBox({
-    prompt: '（备用）粘贴 reclaude.ai 完整 Cookie；推荐用账号密码',
+    prompt: `（备用）粘贴 ${base} 完整 Cookie；推荐用账号密码`,
     placeHolder: 'rc_sid=...',
     ignoreFocusOut: true,
     password: true
@@ -385,6 +428,7 @@ async function setCookieCmd(): Promise<void> {
     await ctx.secrets.store(COOKIE_KEY, input.trim());
     cachedCookie = input.trim();
     cachedCookieEmail = null;
+    cachedCookieApiBase = base;
     vscode.window.showInformationMessage('cookie 已保存');
     refresh();
   }
@@ -407,9 +451,9 @@ async function setOrgIdCmd(): Promise<void> {
 
 async function autoDetectOrgIdCmd(): Promise<void> {
   try {
-    const cookie = await getCookie(false);
-    if (!cookie) { vscode.window.showWarningMessage('请先添加账号'); return; }
-    const id = await autoDetectOrgId(cookie, true);
+    const session = await getSession(false);
+    if (!session) { vscode.window.showWarningMessage('请先添加账号'); return; }
+    const id = await autoDetectOrgId(session, true);
     if (id) { refresh(); }
   } catch (e) {
     const err = e as Error;
@@ -423,8 +467,7 @@ async function clearAllCmd(): Promise<void> {
   await ctx.secrets.delete(LEGACY_EMAIL_KEY);
   await ctx.secrets.delete(LEGACY_PASS_KEY);
   await setActiveEmail(undefined);
-  cachedCookie = null;
-  cachedCookieEmail = null;
+  clearCookieCache();
   lastData = null;
   vscode.window.showInformationMessage('已清除所有账号和凭证');
   refresh();
@@ -446,8 +489,7 @@ async function checkReclaudeCurrentAccount(): Promise<void> {
     const accounts = await getAccounts();
     if (accounts.find(a => a.email === reclaudeEmail)) {
       await setActiveEmail(reclaudeEmail);
-      cachedCookie = null;
-      cachedCookieEmail = null;
+      clearCookieCache();
       vscode.window.showInformationMessage(`检测到 reclaude 切换到 ${reclaudeEmail}，已同步`);
       refresh();
     }
@@ -457,18 +499,25 @@ async function checkReclaudeCurrentAccount(): Promise<void> {
 }
 
 // ============ 登录 + 请求 ============
-async function login(email: string, password: string): Promise<string> {
-  const res = await fetch('https://reclaude.ai/api/auth/login', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'accept': 'application/json',
-      'origin': 'https://reclaude.ai',
-      'referer': 'https://reclaude.ai/login',
-      'user-agent': UA
-    },
-    body: JSON.stringify({ email, password })
-  });
+async function loginAt(apiBase: string, email: string, password: string): Promise<string> {
+  let res: Response;
+  try {
+    res = await fetch(apiUrl(apiBase, '/api/auth/login'), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'accept': 'application/json',
+        'origin': apiBase,
+        'referer': `${apiBase}/login`,
+        'user-agent': UA
+      },
+      body: JSON.stringify({ email, password })
+    });
+  } catch (e) {
+    const err: TaggedError = new Error(`网络错误：${String(e)}`);
+    err.kind = 'network';
+    throw err;
+  }
   if (!res.ok) {
     const body = await res.text();
     if (res.status === 400 || res.status === 401 || res.status === 403 || res.status === 422) {
@@ -476,7 +525,9 @@ async function login(email: string, password: string): Promise<string> {
       err.kind = 'bad-credentials';
       throw err;
     }
-    throw new Error(`登录失败 HTTP ${res.status}: ${body.slice(0, 200)}`);
+    const err: TaggedError = new Error(`登录失败 HTTP ${res.status}: ${body.slice(0, 200)}`);
+    err.kind = 'http';
+    throw err;
   }
   let setCookie: string[] = [];
   const headersAny = res.headers as unknown as { getSetCookie?: () => string[] };
@@ -490,35 +541,104 @@ async function login(email: string, password: string): Promise<string> {
   return setCookie.map(s => s.split(';')[0].trim()).filter(Boolean).join('; ');
 }
 
-async function getCookie(forceRefresh: boolean): Promise<string | null> {
-  if (forceRefresh) { cachedCookie = null; cachedCookieEmail = null; }
+async function loginWithFallback(email: string, password: string): Promise<ApiSession> {
+  const custom = configuredApiBase();
+  const bases = custom ? [custom] : defaultApiBases();
+  let lastErr: unknown = null;
+  for (const apiBase of bases) {
+    try {
+      const cookie = await loginAt(apiBase, email, password);
+      return { cookie, apiBase };
+    } catch (e) {
+      lastErr = e;
+      if (!custom && apiBase === DEFAULT_API_BASE && shouldFallback(e)) {
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr;
+}
+
+async function getSession(forceRefresh: boolean): Promise<ApiSession | null> {
+  if (forceRefresh) { clearCookieCache(); }
   const activeEmail = getActiveEmail();
-  if (cachedCookie && cachedCookieEmail === activeEmail) { return cachedCookie; }
+  if (cachedCookie && cachedCookieEmail === activeEmail && cachedCookieApiBase) {
+    return { cookie: cachedCookie, apiBase: cachedCookieApiBase };
+  }
 
   const cred = await getActiveCredential();
   if (cred) {
-    cachedCookie = await login(cred.email, cred.password);
+    const session = await loginWithFallback(cred.email, cred.password);
+    cachedCookie = session.cookie;
     cachedCookieEmail = cred.email;
-    return cachedCookie;
+    cachedCookieApiBase = session.apiBase;
+    return session;
   }
   const manual = await ctx.secrets.get(COOKIE_KEY);
-  if (manual) { cachedCookie = manual; cachedCookieEmail = null; return manual; }
+  if (manual) {
+    const apiBase = configuredApiBase() || DEFAULT_API_BASE;
+    cachedCookie = manual;
+    cachedCookieEmail = null;
+    cachedCookieApiBase = apiBase;
+    return { cookie: manual, apiBase };
+  }
   return null;
 }
 
-function apiHeaders(cookie: string): Record<string, string> {
+async function getFallbackSession(): Promise<ApiSession | null> {
+  if (configuredApiBase()) { return null; }
+  clearCookieCache();
+  const cred = await getActiveCredential();
+  if (cred) {
+    const cookie = await loginAt(FALLBACK_API_BASE, cred.email, cred.password);
+    cachedCookie = cookie;
+    cachedCookieEmail = cred.email;
+    cachedCookieApiBase = FALLBACK_API_BASE;
+    return { cookie, apiBase: FALLBACK_API_BASE };
+  }
+  const manual = await ctx.secrets.get(COOKIE_KEY);
+  if (!manual) { return null; }
+  cachedCookie = manual;
+  cachedCookieEmail = null;
+  cachedCookieApiBase = FALLBACK_API_BASE;
+  return { cookie: manual, apiBase: FALLBACK_API_BASE };
+}
+
+async function withSessionFallback<T>(
+  session: ApiSession,
+  request: (session: ApiSession) => Promise<T>
+): Promise<T> {
+  try {
+    return await request(session);
+  } catch (e) {
+    if (!canFallback(session.apiBase, e)) { throw e; }
+    const fallback = await getFallbackSession();
+    if (!fallback) { throw e; }
+    return request(fallback);
+  }
+}
+
+function apiHeaders(cookie: string, apiBase: string): Record<string, string> {
   return {
     'accept': '*/*',
     'accept-language': 'zh-CN,zh;q=0.9',
     'cookie': cookie,
-    'referer': 'https://reclaude.ai/app',
+    'referer': `${apiBase}/app`,
     'user-agent': UA,
     'x-lang': 'zh'
   };
 }
 
-async function fetchJSON<T = unknown>(url: string, cookie: string): Promise<T> {
-  const res = await fetch(url, { headers: apiHeaders(cookie) });
+async function fetchJSON<T = unknown>(url: string, session: ApiSession): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: apiHeaders(session.cookie, session.apiBase) });
+  } catch (e) {
+    const err: TaggedError = new Error(`网络错误：${String(e)}`);
+    err.kind = 'network';
+    throw err;
+  }
   if (res.status === 401 || res.status === 403) {
     const err: TaggedError = new Error(`auth-${res.status}`); err.kind = 'auth'; throw err;
   }
@@ -526,10 +646,10 @@ async function fetchJSON<T = unknown>(url: string, cookie: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-async function autoDetectOrgId(cookie: string, interactive: boolean): Promise<string | null> {
+async function autoDetectOrgId(session: ApiSession, interactive: boolean): Promise<string | null> {
   const data = await fetchJSON<CarpoolAllocation[] | { allocations?: CarpoolAllocation[]; items?: CarpoolAllocation[]; data?: CarpoolAllocation[] }>(
-    'https://reclaude.ai/api/app/billing/carpool-allocations',
-    cookie
+    apiUrl(session.apiBase, '/api/app/billing/carpool-allocations'),
+    session
   );
   const list: CarpoolAllocation[] = Array.isArray(data)
     ? data
@@ -563,25 +683,39 @@ async function autoDetectOrgId(cookie: string, interactive: boolean): Promise<st
   return id;
 }
 
-async function fetchAll(cookie: string, orgId: string): Promise<RefreshResult> {
-  const metricsPromise = fetchJSON<MetricsData>('https://reclaude.ai/api/app/ops/metrics', cookie)
-    .catch(() => null);
-  const quotaPromise = orgId
-    ? fetchJSON<QuotaData>(`https://reclaude.ai/api/app/billing/carpool-quota?org_id=${encodeURIComponent(orgId)}`, cookie)
-        .catch((e: TaggedError) => {
-          if (e && e.kind === 'auth') { throw e; }
-          return null;
-        })
-    : Promise.resolve(null);
-  const [metrics, quota] = await Promise.all([metricsPromise, quotaPromise]);
-  return { metrics, quota };
+async function fetchAll(session: ApiSession, orgId: string): Promise<RefreshResult> {
+  return withSessionFallback(session, async (s) => {
+    let metrics: MetricsData | null = null;
+    try {
+      metrics = await fetchJSON<MetricsData>(apiUrl(s.apiBase, '/api/app/ops/metrics'), s);
+    } catch (e) {
+      if (canFallback(s.apiBase, e)) { throw e; }
+    }
+
+    let quota: QuotaData | null = null;
+    if (orgId) {
+      try {
+        quota = await fetchJSON<QuotaData>(
+          `${apiUrl(s.apiBase, '/api/app/billing/carpool-quota')}?org_id=${encodeURIComponent(orgId)}`,
+          s
+        );
+      } catch (e) {
+        const err = e as TaggedError;
+        if (err && err.kind === 'auth') { throw err; }
+        if (canFallback(s.apiBase, err)) { throw err; }
+      }
+    }
+    return { metrics, quota };
+  });
 }
 
 async function refreshMetricsOnly(): Promise<void> {
   try {
-    const cookie = await getCookie(false);
-    if (!cookie || !lastData) { return; }
-    const m = await fetchJSON<MetricsData>('https://reclaude.ai/api/app/ops/metrics', cookie).catch(() => null);
+    const session = await getSession(false);
+    if (!session || !lastData) { return; }
+    const m = await withSessionFallback(session, (s) =>
+      fetchJSON<MetricsData>(apiUrl(s.apiBase, '/api/app/ops/metrics'), s)
+    ).catch(() => null);
     if (m) {
       lastData.metrics = m;
       pushMetricsHistory(m);
@@ -603,16 +737,16 @@ async function refresh(): Promise<void> {
 }
 
 async function doRefresh(): Promise<void> {
-  let cookie: string | null = null;
+  let session: ApiSession | null = null;
   try {
-    cookie = await getCookie(false);
+    session = await getSession(false);
   } catch (e) {
     const err = e as TaggedError;
     if (err.kind === 'bad-credentials') {
       const ok = await promptReenterCredentials(err.message);
       if (ok) {
         try {
-          cookie = await getCookie(true);
+          session = await getSession(true);
         } catch (e2) {
           const err2 = e2 as TaggedError;
           if (err2.kind === 'bad-credentials') {
@@ -631,7 +765,7 @@ async function doRefresh(): Promise<void> {
       return;
     }
   }
-  if (!cookie) {
+  if (!session) {
     setStatus('$(key) 未添加账号', 'reclaude.addAccount', 'warn', '点击添加账号');
     return;
   }
@@ -639,7 +773,7 @@ async function doRefresh(): Promise<void> {
   let orgId = await getActiveOrgId();
   if (!orgId) {
     try {
-      const detected = await autoDetectOrgId(cookie, false);
+      const detected = await withSessionFallback(session, (s) => autoDetectOrgId(s, false));
       orgId = detected || '';
     } catch (e) {
       const err = e as Error;
@@ -654,29 +788,29 @@ async function doRefresh(): Promise<void> {
 
   let result: RefreshResult;
   try {
-    result = await fetchAll(cookie, orgId);
+    result = await fetchAll(session, orgId);
   } catch (e) {
     const err = e as TaggedError;
     if (err.kind === 'auth') {
       try {
-        cookie = await getCookie(true);
-        if (!cookie) {
+        session = await getSession(true);
+        if (!session) {
           setStatus('$(key) 鉴权失败', 'reclaude.switchAccount', 'warn', '请检查账号密码');
           return;
         }
-        result = await fetchAll(cookie, orgId);
+        result = await fetchAll(session, orgId);
       } catch (e2) {
         const err2 = e2 as TaggedError;
         if (err2.kind === 'bad-credentials') {
           const ok = await promptReenterCredentials(err2.message);
           if (ok) {
             try {
-              cookie = await getCookie(true);
-              if (!cookie) {
+              session = await getSession(true);
+              if (!session) {
                 setStatus('$(key) 鉴权失败', 'reclaude.switchAccount', 'warn', '请检查账号密码');
                 return;
               }
-              result = await fetchAll(cookie, orgId);
+              result = await fetchAll(session, orgId);
             } catch (e3) {
               const err3 = e3 as TaggedError;
               if (err3.kind === 'bad-credentials') { setStatus('$(key) 账号或密码错误', 'reclaude.changePassword', 'err', '点击修改密码'); }
@@ -973,7 +1107,7 @@ async function handleDashboardMessage(msg: DashboardMessage): Promise<void> {
     case 'switch':
       if (msg.email) {
         await setActiveEmail(msg.email);
-        cachedCookie = null; cachedCookieEmail = null;
+        clearCookieCache();
         refresh();
         await postAccounts();
       }
@@ -987,7 +1121,7 @@ async function handleDashboardMessage(msg: DashboardMessage): Promise<void> {
       if (existing) { existing.password = password; } else { accounts.push({ email, password }); }
       await saveAccounts(accounts);
       if (!getActiveEmail()) { await setActiveEmail(email); }
-      cachedCookie = null; cachedCookieEmail = null;
+      clearCookieCache();
       refresh();
       await postAccounts();
       break;
@@ -998,7 +1132,7 @@ async function handleDashboardMessage(msg: DashboardMessage): Promise<void> {
       if (!email || !password) { return; }
       const accounts = await getAccounts();
       await saveAccounts(accounts.map(a => a.email === email ? { ...a, password } : a));
-      if (email === getActiveEmail()) { cachedCookie = null; cachedCookieEmail = null; }
+      if (email === getActiveEmail()) { clearCookieCache(); }
       refresh();
       await postAccounts();
       break;
@@ -1011,7 +1145,7 @@ async function handleDashboardMessage(msg: DashboardMessage): Promise<void> {
       await saveAccounts(filtered);
       if (getActiveEmail() === email) {
         await setActiveEmail(filtered[0] ? filtered[0].email : undefined);
-        cachedCookie = null; cachedCookieEmail = null;
+        clearCookieCache();
       }
       refresh();
       await postAccounts();
@@ -1023,8 +1157,8 @@ async function handleDashboardMessage(msg: DashboardMessage): Promise<void> {
       break;
     case 'autoDetectOrgId':
       try {
-        const cookie = await getCookie(false);
-        if (cookie) { await autoDetectOrgId(cookie, true); refresh(); }
+        const session = await getSession(false);
+        if (session) { await withSessionFallback(session, (s) => autoDetectOrgId(s, true)); refresh(); }
       } catch {
         // 忽略
       }

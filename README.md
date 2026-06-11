@@ -10,6 +10,7 @@ VS Code 插件：在状态栏和侧边栏实时显示 reclaude 拼车额度、�
 - **多账号管理**：添加多个账号、一键切换、修改密码；组织 ID（org_id）按账号各自记忆与自动探测，切换账号自动套用。
 - **自动跟随**：检测 `~/.reclaude/device.json`，自动同步 reclaude 当前账号。
 - **定时刷新**：额度与指标独立刷新间隔，支持闲置暂停。
+- **API 地址可配置**：留空默认使用 `https://reclaude.ai`，默认地址不可用时自动切换到 `https://www.recode.cat`。
 
 ## 使用
 
@@ -26,6 +27,7 @@ VS Code 插件：在状态栏和侧边栏实时显示 reclaude 拼车额度、�
 | `reclaude.quotaRefreshIntervalSec` | `60` | 余额刷新间隔（秒） |
 | `reclaude.metricsRefreshIntervalSec` | `30` | 错误率刷新间隔（秒） |
 | `reclaude.idleActivateSec` | `0` | 闲置多久后才定时刷新；0=始终 |
+| `reclaude.apiBase` | `""` | API 根地址；留空时默认 `https://reclaude.ai`，默认地址不可用时自动切到 `https://www.recode.cat`；填写后仅使用该地址 |
 | `reclaude.orgId` | `""` | 拼车组织 ID（仅备用 Cookie 模式使用；账号密码模式按账号自动记忆） |
 
 ## 开发与打包

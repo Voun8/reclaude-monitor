@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 新增 `reclaude.apiBase` 配置项，允许用户自定义监控 API 根地址。
+
+### 变更
+
+- API 根地址留空时优先使用 `https://reclaude.ai`，默认地址网络或服务不可用时自动切换到 `https://www.recode.cat`；填写自定义地址后仅使用该地址。
+
 ## [0.0.2] - 2026-05-30
 
 ### 新增
