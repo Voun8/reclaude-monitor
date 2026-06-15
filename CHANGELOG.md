@@ -4,6 +4,12 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.0.5] - 2026-06-15
+
+### 变更
+
+- Release workflow 改为推送 `v*` tag 后直接创建公开 Release，并自动上传打包生成的 VSIX。
+
 ## [0.0.4] - 2026-06-15
 
 ### 修复

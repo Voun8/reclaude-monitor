@@ -1,6 +1,6 @@
 name: Release
 
-# 推 v* tag 触发，打包 VS Code 插件并创建 Draft Release。
+# 推 v* tag 触发，打包 VS Code 插件并创建公开 Release。
 on:
   push:
     tags:
@@ -13,6 +13,8 @@ permissions:
 jobs:
   package:
     runs-on: ubuntu-latest
+    env:
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
 
     steps:
       - uses: actions/checkout@v4
@@ -34,15 +36,35 @@ jobs:
 
       # 从 CHANGELOG.md 提取最新版本块，作为 GitHub Release 正文。
       - name: Extract release notes from CHANGELOG
+        id: notes
         shell: bash
         run: |
           awk '/^## \[/{n++; if(n==2) exit} n==1 && !/^## \[/' CHANGELOG.md > /tmp/release-notes.md
           test -s /tmp/release-notes.md
+          {
+            echo 'body<<RELEASE_NOTES_EOF'
+            cat /tmp/release-notes.md
+            echo 'RELEASE_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Create draft release
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          draft: true
+          draft: false
           prerelease: false
           body_path: /tmp/release-notes.md
           files: dist/*.vsix
+
+      - name: Sync Gitee release
+        uses: nicennnnnnnlee/action-gitee-release@master
+        with:
+          gitee_action: create_release
+          gitee_owner: vvvon
+          gitee_repo: reclaude-monitor
+          gitee_token: ${{ secrets.GITEE_TOKEN }}
+          gitee_tag_name: ${{ github.ref_name }}
+          gitee_release_name: Reclaude Monitor ${{ github.ref_name }}
+          gitee_release_body: ${{ steps.notes.outputs.body }}
+          gitee_target_commitish: ${{ github.sha }}
+          gitee_upload_retry_times: 3
+          gitee_files: dist/*.vsix
