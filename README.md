@@ -41,7 +41,7 @@ pnpm run package      # 清理 + 编译 + 用 vsce 打包到 dist/*.vsix
 安装打包好的 vsix：
 
 ```bash
-code --install-extension dist/reclaude-monitor-0.0.5.vsix --force
+code --install-extension dist/reclaude-monitor-0.0.6.vsix --force
 ```
 
 ## License

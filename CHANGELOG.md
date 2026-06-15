@@ -4,6 +4,12 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.0.6] - 2026-06-15
+
+### 变更
+
+- 重新触发公开 GitHub Release 与 Gitee Release 自动同步流程。
+
 ## [0.0.5] - 2026-06-15
 
 ### 变更

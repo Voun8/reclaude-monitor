@@ -2,7 +2,7 @@
   "name": "reclaude-monitor",
   "displayName": "Reclaude Monitor",
   "description": "状态栏显示 reclaude 拼车额度、个人用量和服务可用性",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "publisher": "ReclaudeMonitor",
   "license": "MIT",
   "icon": "media/icon.png",
