@@ -2,7 +2,7 @@
   "name": "reclaude-monitor",
   "displayName": "Reclaude Monitor",
   "description": "状态栏显示 reclaude 拼车额度、个人用量和服务可用性",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "publisher": "ReclaudeMonitor",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -100,7 +100,7 @@
         "reclaude.apiBase": {
           "type": "string",
           "default": "",
-          "description": "API 根地址。留空时默认使用 https://reclaude.ai；当默认地址网络或服务不可用时自动切换到 https://www.recode.cat。填写自定义地址后仅使用该地址。"
+          "description": "API 根地址。留空时默认使用 https://www.recode.cat；网络或服务不可用时依次切换到 https://www.reclaude.ai、https://reclaude.ai。填写自定义地址后仅使用该地址。"
         },
         "reclaude.orgId": {
           "type": "string",

@@ -8,8 +8,9 @@ const ACTIVE_EMAIL_STATE = 'reclaude.activeEmail';
 const COOKIE_KEY = 'reclaude.cookie';
 const LEGACY_EMAIL_KEY = 'reclaude.email';
 const LEGACY_PASS_KEY = 'reclaude.password';
-const DEFAULT_API_BASE = 'https://reclaude.ai';
-const FALLBACK_API_BASE = 'https://www.recode.cat';
+const DEFAULT_API_BASE = 'https://www.recode.cat';
+const FALLBACK_API_BASE = 'https://www.reclaude.ai';
+const LEGACY_API_BASE = 'https://reclaude.ai';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
 
 interface Account {
@@ -92,7 +93,7 @@ function configuredApiBase(): string | null {
 }
 
 function defaultApiBases(): string[] {
-  return [DEFAULT_API_BASE, FALLBACK_API_BASE];
+  return [DEFAULT_API_BASE, FALLBACK_API_BASE, LEGACY_API_BASE];
 }
 
 function apiUrl(apiBase: string, pathname: string): string {
@@ -109,7 +110,14 @@ function isRbacAccessDenied(body: string): boolean {
 }
 
 function canFallback(apiBase: string, e: unknown): boolean {
-  return !configuredApiBase() && apiBase === DEFAULT_API_BASE && shouldFallback(e);
+  const idx = defaultApiBases().indexOf(apiBase);
+  return !configuredApiBase() && idx >= 0 && idx + 1 < defaultApiBases().length && shouldFallback(e);
+}
+
+function nextApiBases(apiBase: string): string[] {
+  const bases = defaultApiBases();
+  const idx = bases.indexOf(apiBase);
+  return bases.slice(idx >= 0 ? idx + 1 : 0);
 }
 
 function clearCookieCache(): void {
@@ -560,7 +568,7 @@ async function loginWithFallback(email: string, password: string): Promise<ApiSe
       return { cookie, apiBase };
     } catch (e) {
       lastErr = e;
-      if (!custom && apiBase === DEFAULT_API_BASE && shouldFallback(e)) {
+      if (!custom && canFallback(apiBase, e)) {
         continue;
       }
       throw e;
@@ -595,36 +603,53 @@ async function getSession(forceRefresh: boolean): Promise<ApiSession | null> {
   return null;
 }
 
-async function getFallbackSession(): Promise<ApiSession | null> {
+async function getFallbackSession(apiBase: string): Promise<ApiSession | null> {
   if (configuredApiBase()) { return null; }
   clearCookieCache();
+  const bases = nextApiBases(apiBase);
   const cred = await getActiveCredential();
   if (cred) {
-    const cookie = await loginAt(FALLBACK_API_BASE, cred.email, cred.password);
-    cachedCookie = cookie;
-    cachedCookieEmail = cred.email;
-    cachedCookieApiBase = FALLBACK_API_BASE;
-    return { cookie, apiBase: FALLBACK_API_BASE };
+    let lastErr: unknown = null;
+    for (const base of bases) {
+      try {
+        const cookie = await loginAt(base, cred.email, cred.password);
+        cachedCookie = cookie;
+        cachedCookieEmail = cred.email;
+        cachedCookieApiBase = base;
+        return { cookie, apiBase: base };
+      } catch (e) {
+        lastErr = e;
+        if (canFallback(base, e)) { continue; }
+        throw e;
+      }
+    }
+    if (lastErr) { throw lastErr; }
+    return null;
   }
   const manual = await ctx.secrets.get(COOKIE_KEY);
   if (!manual) { return null; }
+  const base = bases[0];
+  if (!base) { return null; }
   cachedCookie = manual;
   cachedCookieEmail = null;
-  cachedCookieApiBase = FALLBACK_API_BASE;
-  return { cookie: manual, apiBase: FALLBACK_API_BASE };
+  cachedCookieApiBase = base;
+  return { cookie: manual, apiBase: base };
 }
 
 async function withSessionFallback<T>(
   session: ApiSession,
   request: (session: ApiSession) => Promise<T>
 ): Promise<T> {
-  try {
-    return await request(session);
-  } catch (e) {
-    if (!canFallback(session.apiBase, e)) { throw e; }
-    const fallback = await getFallbackSession();
-    if (!fallback) { throw e; }
-    return request(fallback);
+  let current = session;
+  while (true) {
+    try {
+      return await request(current);
+    } catch (e) {
+      if (!canFallback(current.apiBase, e)) { throw e; }
+      const fallback = await getFallbackSession(current.apiBase);
+      if (!fallback) { throw e; }
+      current = fallback;
+    }
   }
 }
 

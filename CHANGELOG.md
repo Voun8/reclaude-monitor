@@ -4,6 +4,13 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.0.4] - 2026-06-15
+
+### 修复
+
+- 默认 API 根地址优先使用 `https://www.recode.cat`，并保留 `https://www.reclaude.ai`、`https://reclaude.ai` 作为自动降级地址。
+- 明确区分 RBAC 拒绝、组织无权限和限流错误，减少接口异常时的误判。
+
 ## [0.0.3] - 2026-06-11
 
 ### 新增
@@ -12,7 +19,7 @@
 
 ### 变更
 
-- API 根地址留空时优先使用 `https://reclaude.ai`，默认地址网络或服务不可用时自动切换到 `https://www.recode.cat`；填写自定义地址后仅使用该地址。
+- API 根地址留空时优先使用 `https://www.recode.cat`，网络或服务不可用时依次切换到 `https://www.reclaude.ai`、`https://reclaude.ai`；填写自定义地址后仅使用该地址。
 - 默认地址返回 `403 RBAC: access denied` 时也视为域名不可用并触发自动切换，避免地区访问限制被误判为账号密码错误。
 
 ## [0.0.2] - 2026-05-30
