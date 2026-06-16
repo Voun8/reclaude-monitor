@@ -4,6 +4,24 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.0.7] - 2026-06-16
+
+本次为内部重构 + 安全加固版本，对外行为保持不变（除下述修复）。
+
+### 新增
+
+- **Cookie 优先复用**：账号登录获得的 Cookie 持久化到 SecretStorage，后续优先复用，仅当 Cookie 失效（401）时才用密码重登并刷新缓存；削减明文密码的重放频次。改密 / 删除账号 / 清除全部时自动失效对应 Cookie，失效后下次自动用新密码重登。
+
+### 变更
+
+- 内部重构（行为等价）：单文件 `extension.ts`（约 1486 行）按职责拆分为 14 个模块（runtime / accounts / http / session / statusbar / dashboard / refresh / scheduler / commands 等）。
+- 额度与服务指标的派生计算（阈值、状态文案）收敛为单一来源；账号增删改、HTTP 错误分类、鉴权重试与会话缓存逻辑去重收敛。
+
+### 修复
+
+- 监控面板点击「自动探测组织 ID」失败时无任何反馈 → 现与命令一致弹出错误提示。
+- 收紧若干静默 `catch`，非预期异常改为记录而非吞掉。
+
 ## [0.0.6] - 2026-06-15
 
 ### 变更
