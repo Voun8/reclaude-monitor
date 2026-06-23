@@ -100,7 +100,12 @@
         "reclaude.apiBase": {
           "type": "string",
           "default": "",
-          "description": "API 根地址。留空时默认使用 https://www.recode.cat；网络或服务不可用时依次切换到 https://www.reclaude.ai、https://reclaude.ai。填写自定义地址后仅使用该地址。"
+          "description": "API 根地址（中转服务地址）。留空时默认使用 https://proxy.mortysky.top；填写后仅使用该地址。上游 failover 由中转负责。"
+        },
+        "reclaude.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "中转服务（reclaude-proxy）的访问令牌：在中转管理面板为本用户签发的 API Key。填入后所有请求带 x-api-key 头；中转启用鉴权时必填。"
         },
         "reclaude.orgId": {
           "type": "string",

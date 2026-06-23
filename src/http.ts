@@ -7,6 +7,15 @@ import { setActiveOrgId } from './accounts.js';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
 
+// 中转鉴权令牌（reclaude.apiKey）：配置后所有请求带 x-api-key；留空则不带（兼容未启用鉴权的中转）。
+function proxyApiKey(): string {
+  return vscode.workspace.getConfiguration('reclaude').get<string>('apiKey', '').trim();
+}
+function applyProxyKey(headers: Record<string, string>): void {
+  const key = proxyApiKey();
+  if (key) { headers['x-api-key'] = key; }
+}
+
 // ============ 登录 + 请求 ============
 export function makeTagged(kind: TaggedError['kind'], message: string): TaggedError {
   const err: TaggedError = new Error(message);
@@ -43,15 +52,17 @@ export async function httpError(
 }
 
 export async function loginAt(apiBase: string, email: string, password: string): Promise<string> {
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'accept': 'application/json',
+    'origin': apiBase,
+    'referer': `${apiBase}/login`,
+    'user-agent': UA
+  };
+  applyProxyKey(headers);
   const res = await httpRequest(apiUrl(apiBase, '/api/auth/login'), {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'accept': 'application/json',
-      'origin': apiBase,
-      'referer': `${apiBase}/login`,
-      'user-agent': UA
-    },
+    headers,
     body: JSON.stringify({ email, password })
   });
   if (!res.ok) {
@@ -70,7 +81,7 @@ export async function loginAt(apiBase: string, email: string, password: string):
 }
 
 export function apiHeaders(cookie: string, apiBase: string): Record<string, string> {
-  return {
+  const headers: Record<string, string> = {
     'accept': '*/*',
     'accept-language': 'zh-CN,zh;q=0.9',
     'cookie': cookie,
@@ -78,6 +89,8 @@ export function apiHeaders(cookie: string, apiBase: string): Record<string, stri
     'user-agent': UA,
     'x-lang': 'zh'
   };
+  applyProxyKey(headers);
+  return headers;
 }
 
 export async function fetchJSON<T = unknown>(url: string, session: ApiSession): Promise<T> {

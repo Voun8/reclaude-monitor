@@ -3,7 +3,7 @@
 import type { QuotaData, MetricsData, RefreshResult, TaggedError, ApiSession } from './types.js';
 import { apiUrl } from './apiBase.js';
 import { getActiveEmail, getActiveOrgId } from './accounts.js';
-import { canFallback, getSession, withSessionFallback } from './session.js';
+import { getSession } from './session.js';
 import { fetchJSON, autoDetectOrgId } from './http.js';
 import { deriveQuota, deriveMetrics } from './derive.js';
 import { setStatus, render } from './statusbar.js';
@@ -71,38 +71,35 @@ function applyRefreshError(message: string): void {
 }
 
 async function fetchAll(session: ApiSession, orgId: string): Promise<RefreshResult> {
-  return withSessionFallback(session, async (s) => {
-    let metrics: MetricsData | null = null;
-    try {
-      metrics = await fetchJSON<MetricsData>(apiUrl(s.apiBase, '/api/app/ops/metrics'), s);
-    } catch (e) {
-      if (canFallback(s.apiBase, e)) { throw e; }
-    }
+  let metrics: MetricsData | null = null;
+  try {
+    metrics = await fetchJSON<MetricsData>(apiUrl(session.apiBase, '/api/app/ops/metrics'), session);
+  } catch (e) {
+    // metrics 非关键（部分账号 RBAC 拒绝）：失败置空、不打断额度获取。网络/5xx 已由中转处理。
+    console.warn('[reclaude] 取 metrics 失败，置空继续', e);
+  }
 
-    let quota: QuotaData | null = null;
-    if (orgId) {
-      try {
-        quota = await fetchJSON<QuotaData>(
-          `${apiUrl(s.apiBase, '/api/app/billing/carpool-quota')}?org_id=${encodeURIComponent(orgId)}`,
-          s
-        );
-      } catch (e) {
-        const err = e as TaggedError;
-        if (err && err.kind === 'auth') { throw err; }
-        if (canFallback(s.apiBase, err)) { throw err; }
-      }
+  let quota: QuotaData | null = null;
+  if (orgId) {
+    try {
+      quota = await fetchJSON<QuotaData>(
+        `${apiUrl(session.apiBase, '/api/app/billing/carpool-quota')}?org_id=${encodeURIComponent(orgId)}`,
+        session
+      );
+    } catch (e) {
+      const err = e as TaggedError;
+      if (err && err.kind === 'auth') { throw err; } // 鉴权失效 → 上层重登
+      console.warn('[reclaude] 取 quota 失败，置空', e); // 其它错误：保留 quota=null
     }
-    return { metrics, quota };
-  });
+  }
+  return { metrics, quota };
 }
 
 export async function refreshMetricsOnly(): Promise<void> {
   try {
     const session = await getSession(false);
     if (!session || !lastData) { return; }
-    const m = await withSessionFallback(session, (s) =>
-      fetchJSON<MetricsData>(apiUrl(s.apiBase, '/api/app/ops/metrics'), s)
-    ).catch(() => null);
+    const m = await fetchJSON<MetricsData>(apiUrl(session.apiBase, '/api/app/ops/metrics'), session).catch(() => null);
     if (m) {
       lastData.metrics = m;
       pushMetricsHistory(m);
@@ -165,7 +162,7 @@ async function doRefresh(): Promise<void> {
   let orgId = await getActiveOrgId();
   if (!orgId) {
     try {
-      const detected = await withSessionFallback(session, (s) => autoDetectOrgId(s, false));
+      const detected = await autoDetectOrgId(session, false);
       orgId = detected || '';
     } catch (e) {
       const err = e as Error;

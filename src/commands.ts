@@ -10,7 +10,7 @@ import {
   getAccounts, saveAccounts, getActiveEmail, setActiveEmail, getActiveOrgId, setActiveOrgId,
   addOrUpdateAccount, switchTo, removeAccountCore, changeAccountPassword, clearStoredSession
 } from './accounts.js';
-import { configuredApiBase, invalidateSession, getSession, withSessionFallback } from './session.js';
+import { configuredApiBase, invalidateSession, getSession } from './session.js';
 import { autoDetectOrgId } from './http.js';
 import { refresh, clearLastData } from './refresh.js';
 import { postAccounts, type DashboardMessage } from './dashboard.js';
@@ -26,7 +26,7 @@ export async function runAutoDetectOrgId(): Promise<void> {
   try {
     const session = await getSession(false);
     if (!session) { vscode.window.showWarningMessage('请先添加账号'); return; }
-    const id = await withSessionFallback(session, (s) => autoDetectOrgId(s, true));
+    const id = await autoDetectOrgId(session, true);
     if (id) { refresh(); }
   } catch (e) {
     const err = e as Error;
